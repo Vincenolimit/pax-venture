@@ -1,7 +1,7 @@
 # Pax Venture — MVP RFC
 
 **Status**: DRAFT  
-**Goal**: Validate that a month-by-month CEO simulation driven by LLM chat is addictive.  
+**Vision**: Pax Historia, mais en version entreprise. Tu es CEO, l'LLM est le moteur du jeu, le chat est ton seul input. L'interface: 1 inbox pour les news, 1 cash position, 1 leaderboard. Mois par mois, cash < $0 = élimination.  
 **Rule**: Solo, automotive, chat-only input, cash < $0 = elimination.
 
 ---

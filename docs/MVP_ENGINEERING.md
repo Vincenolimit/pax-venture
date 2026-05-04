@@ -24,7 +24,7 @@ A solo business simulation game. You're the CEO of an automotive company. Each t
 │  ├── Player reads inbox                             │
 │  ├── Player chats decisions (free text, no buttons)  │
 │  ├── LLM resolves each decision → narrative + $      │
-│  ├── Fiche 10 is updated with new track record       │
+│  ├── Memory compacted (state JSON + hierarchical)    │
 │  └── Repeat until player hits "End Month"            │
 │                                                      │
 │  END MONTH                                          │
@@ -60,13 +60,14 @@ A solo business simulation game. You're the CEO of an automotive company. Each t
 │  ├── /api/v1/*                   │  Game state, inbox, decisions
 │  ├── SQLite (aiosqlite)          │  Single file DB, no infrastructure
 │  └── OpenRouter client           │  Model routing via OpenRouter API
+│  └── 3-Layer Memory Engine      │  Structured state + hierarchical memory
 └────────────┬────────────────────┘
              │
 ┌────────────▼────────────────────┐
 │  OpenRouter                      │
 │  └── Model routing by task       │  Events: haiku-class (cheap)
 │                                   │  Decisions: sonnet-class
-│                                   │  Fiche updates: haiku-class
+│                                   │  Memory compaction: haiku-class
 │  Total per month: ~$0.04         │
 └─────────────────────────────────┘
 ```
@@ -80,13 +81,120 @@ A solo business simulation game. You're the CEO of an automotive company. Each t
 | **No WebSocket** | MVP doesn't need real-time. The game is turn-based. |
 | **OpenRouter** | One API key, any model. Route cheap models for emails, better models for key moments. |
 | **No UI library** | Dark theme, 3 panels, CSS is ~300 lines. MUI would add 2MB for nothing. |
-| **Fiche as .md file** | LLM reads markdown natively. No parsing. No schema migrations. Just a file on disk. |
+| **3-Layer Memory** | Fixed ~1,300 tokens regardless of game length. No context explosion at month 47. |
 
 ---
 
-## 3. Data Model
+## 3. Memory Architecture
 
-### SQLite Tables (5 tables, zero joins in the hot path)
+### The Problem
+
+At month 47, a naive "append everything to the Fiche 10" approach produces 15,000+ tokens of linear history. The LLM loses the thread, costs explode, and continuity degrades.
+
+**Solution: 3-Layer Memory** — fixed ~1,300 tokens regardless of game length.
+
+### Layer 1: Structured State JSON (~800 tokens, always in-context)
+
+Deterministic. No LLM needed. Updated after every decision via code.
+
+```json
+{
+  "company": "Vento Motors",
+  "ceo": "Vincenzo",
+  "style": "aggressive",
+  "risk_tolerance": "high",
+  "month": 47,
+  "cash": 14200000,
+  "revenue": 8500000,
+  "market_share": 12.3,
+  "employees": 340,
+  "burn_rate": 2100000,
+  "revenue_trend": "growing",
+  "cash_trend": "stable",
+  "key_relationships": {
+    "board": "pleased",
+    "suppliers": "strained_after_battery_contract",
+    "government": "favorable_EV_subsidy"
+  },
+  "active_threads": [
+    "EV_platform_launch_M42",
+    "European_expansion",
+    "board_demands_profitability"
+  ],
+  "flags": {
+    "ev_platform_launched": true,
+    "european_expansion": true,
+    "battery_supply_secured": true,
+    "recall_risk": false
+  }
+}
+```
+
+This replaces 47 lines of "M1: cash $8.2M, Revenue $1.5M → ..." with one compact object. **80-95% token reduction vs. linear history.**
+
+### Layer 2: Hierarchical Memory (~500 tokens, always in-context)
+
+3 granularity levels. Managed by Haiku after each decision:
+
+```
+## Recent (M45-M47, verbatim)
+- M45: Acquired battery supplier for $3.2M → supply chain secured, board approves
+- M46: EV platform launched → $1.8M revenue in first month, market share +2.1%
+- M47: European expansion delayed by regulatory hurdles → $400K in legal fees
+
+## Period Summary (M20-M44)
+European expansion drove revenue from $3M to $7M, but burned cash reserves.
+Board demanded profitability by M30. CEO pivoted from marketing to R&D in M28.
+Key supplier deal with CATL in M22 secured battery supply. Recall in M33 cost $1.2M.
+
+## Origin Story (M1-M19)
+Founded as budget sedan maker. Early R&D underfunded. Key pivot: EV platform
+decision in M15 after board pressure. Market share grew from 5% to 8%.
+```
+
+**Compaction rules:**
+- Last 3 months → verbatim (1 line per decision)
+- M4 to M-20 → 1 paragraph summary, recompressed every 5 months
+- M21+ → 1-2 sentence archive, recompressed every 10 months
+
+### Layer 3: Important Events DB (SQLite, on-demand retrieval)
+
+Not in-context by default. Retrieved when the player references a past event.
+
+```sql
+decisions
+  importance REAL DEFAULT 0.5    -- 0-1 scale, scored by LLM at resolution time
+
+-- High importance (>= 0.8): "Acquired battery supplier", "Launched EV platform"
+-- Low importance (< 0.3): "Cut marketing by 5%", "Hired 2 engineers"
+```
+
+If the player asks "What happened with the battery deal?", the game retrieves the full decision from SQLite and injects it into context for that turn only.
+
+### Token Budget Comparison
+
+| Approach | M1 | M10 | M24 | M47 |
+|----------|----|----|----|----|
+| **Linear Fiche 10** (old) | 500 | 2,000 | 5,000 | 15,000+ |
+| **3-Layer Memory** (new) | 1,300 | 1,300 | 1,300 | 1,300 |
+| **Full conversation history** (naive) | 1,000 | 10,000 | 30,000 | 100,000+ |
+
+**Fixed cost. No context explosion. Works at month 5 or month 50.**
+
+### Research Sources
+
+| Technique | Source | Applied As |
+|-----------|--------|------------|
+| Structured State Tracking | MemoryBank, Wang et al. 2024 | Layer 1 (JSON state) |
+| Hierarchical Memory Summarization | Recallen, StreaK 2024-25 | Layer 2 (3-level compression) |
+| Importance-Weighted Memory | Generative Agents, Park 2023-24 | Layer 3 (importance scoring) |
+| MemGPT virtual memory paging | Packer et al. 2024 | On-demand retrieval from DB |
+
+---
+
+## 4. Data Model
+
+### SQLite Tables (6 tables, zero joins in the hot path)
 
 ```sql
 -- Player state (single row per game)
@@ -94,104 +202,90 @@ players
   id TEXT PK
   name TEXT, company_name TEXT
   industry TEXT DEFAULT 'automotive'
-  style TEXT DEFAULT 'balanced'
+  style TEXT DEFAULT 'balanced'       -- aggressive | balanced | conservative | innovation
   risk_tolerance TEXT DEFAULT 'medium'
   current_month INT DEFAULT 0
   cash REAL DEFAULT 10000000
   revenue REAL DEFAULT 0
   market_share REAL DEFAULT 5.0
+  employees INT DEFAULT 50
   created_at TIMESTAMP
+
+-- Structured game state (Layer 1 memory — JSON blob)
+game_states
+  id INT PK AUTOINCREMENT
+  player_id TEXT FK → players.id      -- 1:1 with player
+  state_json TEXT                      -- the full JSON object (Layer 1)
+  updated_at TIMESTAMP
+
+-- Hierarchical memory (Layer 2 memory — markdown text)
+memories
+  id INT PK AUTOINCREMENT
+  player_id TEXT FK → players.id      -- 1:1 with player
+  recent TEXT                          -- last 3 months verbatim
+  period_summary TEXT                  -- 1 paragraph for M4 to M-20
+  origin_story TEXT                    -- 1-2 sentences for oldest months
+  period_start INT                     -- month where period_summary begins
+  period_end INT                       -- month where period_summary ends
+  updated_at TIMESTAMP
 
 -- Inbox messages
 messages
   id INT PK AUTOINCREMENT
   player_id TEXT FK → players.id
   month INT
-  sender TEXT                    -- "Board", "CFO", "Market", "Supplier", "Regulator"
+  sender TEXT                         -- "Board", "CFO", "Market", "Supplier", "Regulator"
   subject TEXT
   body TEXT
-  category TEXT                 -- info | warning | opportunity | crisis | board
+  category TEXT                       -- info | warning | opportunity | crisis | board
   is_read BOOLEAN DEFAULT FALSE
   requires_action BOOLEAN DEFAULT FALSE
 
--- Player decisions (free text + LLM outcome)
+-- Player decisions (free text + LLM outcome + importance)
 decisions
   id INT PK AUTOINCREMENT
   player_id TEXT FK → players.id
   month INT
-  decision_text TEXT
-  llm_context TEXT             -- what the LLM considered (debugging)
-  outcome TEXT                  -- narrative result
+  decision_text TEXT                   -- what the player typed
+  outcome TEXT                         -- narrative result
+  importance REAL DEFAULT 0.5          -- 0-1, scored by LLM
   cash_impact REAL DEFAULT 0
   revenue_impact REAL DEFAULT 0
   market_impact REAL DEFAULT 0
 
--- Monthly snapshot
-monthly_reports
-  id INT PK AUTOINCREMENT
-  player_id TEXT FK → players.id
-  month INT
-  cash REAL, revenue REAL, expenses REAL
-  profit REAL, market_share REAL
-  employees INT DEFAULT 50
-
 -- AI competitors (pre-seeded, formula-driven)
 competitors
-  id TEXT PK                    -- "novatech", "autovista", "drivex"
+  id TEXT PK                           -- "novatech", "autovista", "drivex"
   name TEXT
   style TEXT
   base_growth REAL
   volatility REAL
+  cash REAL
+  revenue REAL
+  market_share REAL
 ```
 
-### Fiche 10 (Markdown File)
+### What Changed vs. Original Design
 
-Path: `data/players/{player_id}.md`
-
-```markdown
-# Fiche 10 — Vento Motors
-
-## CEO Profile
-- Name: Vincenzo
-- Style: Aggressive growth
-- Risk tolerance: High
-
-## Company
-- Industry: Automotive
-- Founded: Month 1
-- Starting cash: $10,000,000
-
-## Track Record
-- M1: Cash $8.2M, Revenue $1.5M → "Launched budget sedan line"
-- M2: Cash $6.8M, Revenue $2.1M → "Cut R&D to fund marketing blitz"
-- M3: Cash $5.1M, Revenue $2.4M → "Expanded to European market"
-
-## Key Metrics
-- Revenue trend: +60% in 3 months
-- Cash burn: -$1.6M/month
-- Market share: 7.2%
-- Employees: 85
-
-## LLM Notes
-- CEO favors aggressive expansion over profitability
-- Cash reserves declining — at risk if no revenue inflection by M6
-- Strong brand awareness from marketing spend
-- European entry is burning cash faster than expected
-```
-
-**Why .md**: The LLM reads this file verbatim every turn. No parsing, no ORM, no migration. Just raw context that makes the AI generate relevant, personalized content. The Track Record section is the key — it's how the LLM "remembers" what happened.
+| Before | After | Why |
+|--------|-------|-----|
+| `monthly_reports` table | Removed | `game_states` JSON + `memories` replaces it with less schema |
+| `leaderboard` table | Removed | Denormalized — computed on the fly from players + competitors |
+| Fiche 10 `.md` file | `game_states` JSON + `memories` table | Structured state is more compact and deterministic |
+| `decisions.importance` | New field | Enables importance-weighted retrieval (Layer 3) |
+| `competitors.cash/revenue/market_share` | New fields | Competitors need persistent state between months |
 
 ---
 
-## 4. API Endpoints (8 endpoints, that's it)
+## 5. API Endpoints (8 endpoints, that's it)
 
 ```
-POST   /api/v1/players                    → Create player + Fiche 10
+POST   /api/v1/players                    → Create player + game state + memory
 GET    /api/v1/players/{id}               → Get player state
-GET    /api/v1/players/{id}/fiche         → Get Fiche 10 markdown
+GET    /api/v1/players/{id}/memory        → Get 3-layer memory (state JSON + hierarchical text)
 
 POST   /api/v1/players/{id}/start-month   → Generate inbox emails, advance month
-POST   /api/v1/players/{id}/decide         → Submit free-text decision, get outcome
+POST   /api/v1/players/{id}/decide         → Submit free-text decision, get outcome + compact memory
 POST   /api/v1/players/{id}/end-month      → Close month, update financials
 
 GET    /api/v1/players/{id}/inbox          → List inbox messages
@@ -202,7 +296,7 @@ GET    /api/v1/leaderboard                 → Player + AI competitors, sorted b
 
 ---
 
-## 5. LLM Integration
+## 6. LLM Integration
 
 ### OpenRouter Configuration
 
@@ -211,24 +305,41 @@ OPENROUTER_API_KEY = env("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Model routing by task (cost-optimized)
-MODEL_EVENTS  = "anthropic/claude-3.5-haiku"   # Cheap, fast, generates emails
-MODEL_DECIDE  = "anthropic/claude-3.5-sonnet"   # Better reasoning for outcomes
-MODEL_FICHE   = "anthropic/claude-3.5-haiku"    # Factual updates, cheap is fine
+MODEL_EVENTS    = "anthropic/claude-3.5-haiku"   # Cheap, fast, generates emails
+MODEL_DECIDE    = "anthropic/claude-3.5-sonnet"   # Better reasoning for outcomes
+MODEL_COMPACT   = "anthropic/claude-3.5-haiku"    # Memory compaction, cheap is fine
 ```
 
-### Three LLM Calls Per Month
+### LLM Calls Per Month
 
 | Call | When | Model | Input | Output |
 |------|------|-------|-------|--------|
-| **generate_events** | Player clicks "Start Month" | Haiku | Fiche 10 + month + recent decisions | 3-5 inbox emails (JSON) |
-| **resolve_decision** | Player sends chat message | Sonnet | Fiche 10 + current state + decision text | Narrative + financial impacts (JSON) |
-| **update_fiche** | After each decision | Haiku | Current fiche + decision + outcome | Updated markdown |
+| **generate_events** | Player clicks "Start Month" | Haiku | Layer 1 (state JSON) + Layer 2 (memory) + month | 3-5 inbox emails (JSON) |
+| **resolve_decision** | Player sends chat message | Sonnet | Layer 1 + Layer 2 + current state + decision text | Narrative + financial impacts + importance score (JSON) |
+| **compact_memory** | After each decision | Haiku | Current memory + new event | Updated recent/summary/archive text |
 
 ### System Prompt (Core Engine)
+
+The prompt receives the 3-layer memory structure, not a flat file:
 
 ```
 You are the game engine for Pax Venture, an automotive business simulation.
 You generate realistic, specific, dramatic business events.
+
+GAME STATE (always accurate):
+{state_json}
+
+RECENT EVENTS (last 3 months, detailed):
+{recent_verbatim}
+
+PERIOD SUMMARY (M{start}-M{end}):
+{period_summary}
+
+ORIGIN STORY (M1-M{early_end}):
+{origin_story}
+
+ACTIVE THREADS:
+{active_threads_list}
 
 CRITICAL RULES:
 1. Be specific to the automotive industry (models, suppliers, factories, regulations)
@@ -238,7 +349,8 @@ CRITICAL RULES:
 5. The player is not a superhero — bad decisions should hurt
 6. Generate drama: rivalries, market shifts, supply chain crises, government regulation
 7. Every email should feel like it arrived on a real CEO's desk
-8. Reference past decisions from the Fiche 10 — continuity matters
+8. Reference active threads and past events from the memory above — continuity matters
+9. Output an importance score (0-1) for every decision resolution
 
 INDUSTRY CONTEXT:
 - Global automotive market, EV transition happening
@@ -278,7 +390,7 @@ This gives the leaderboard organic movement without burning LLM tokens.
 
 ---
 
-## 6. UI Layout (Single Screen, No Scroll)
+## 7. UI Layout (Single Screen, No Scroll)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -340,7 +452,7 @@ This gives the leaderboard organic movement without burning LLM tokens.
 
 ---
 
-## 7. Game Mechanics
+## 8. Game Mechanics
 
 ### Starting State
 
@@ -385,7 +497,7 @@ Implicit goal: survive 24 months with the most cash.
 
 ---
 
-## 8. Competitor Profiles (Pre-seeded AI)
+## 9. Competitor Profiles (Pre-seeded AI)
 
 | ID | Name | Style | Base Growth | Volatility | Starting Cash |
 |----|------|-------|-------------|------------|---------------|
@@ -400,23 +512,25 @@ Quarterly disaster events (3% chance) add narrative: recalls, CEO scandals, supp
 
 ---
 
-## 9. LLM Cost Estimate
+## 10. LLM Cost Estimate
 
 Per month of gameplay:
 
 | Call | Tokens In | Tokens Out | Model | Cost |
 |------|-----------|------------|-------|------|
-| generate_events | ~2,000 | ~500 | Haiku | ~$0.003 |
-| resolve_decision (×3 avg) | ~2,000 × 3 | ~300 × 3 | Sonnet | ~$0.030 |
-| update_fiche (×3 avg) | ~1,500 × 3 | ~800 × 3 | Haiku | ~$0.010 |
-| **Total per month** | | | | **~$0.04** |
-| **Full 24-month game** | | | | **~$1.00** |
+| generate_events | ~1,800 | ~500 | Haiku | ~$0.003 |
+| resolve_decision (×3 avg) | ~1,800 × 3 | ~300 × 3 | Sonnet | ~$0.027 |
+| compact_memory (×3 avg) | ~1,000 × 3 | ~400 × 3 | Haiku | ~$0.006 |
+| **Total per month** | | | | **~$0.036** |
+| **Full 24-month game** | | | | **~$0.86** |
+| **Full 50-month game** | | | | **~$1.80** |
 
+Token count stays fixed at ~1,300 per call regardless of game length (3-layer memory).
 OpenRouter pricing. Can be halved by using Haiku for decisions (less dramatic, more consistent).
 
 ---
 
-## 10. File Structure (Final)
+## 11. File Structure (Final)
 
 ```
 pax-venture/
@@ -428,9 +542,10 @@ pax-venture/
 │   │   │   ├── database.py         # SQLAlchemy async init
 │   │   │   └── llm.py              # 3 LLM functions + OpenRouter client
 │   │   ├── models/
-│   │   │   └── game.py             # Player, Message, Decision, MonthlyReport, Competitor
+│   │   │   └── game.py             # Player, Game State, Memory, Message, Decision, Competitor
 │   │   ├── services/
 │   │   │   ├── game_engine.py      # Start month, decide, end month, leaderboard
+│   │   │   ├── memory.py           # 3-layer memory compaction engine
 │   │   │   └── competitors.py      # Formula-driven AI competitor simulation
 │   │   └── api/
 │   │       └── routes.py           # 8 REST endpoints
@@ -450,8 +565,6 @@ pax-venture/
 │   ├── index.html
 │   ├── vite.config.js
 │   └── package.json
-├── data/
-│   └── players/                    # Fiche 10 markdown files
 ├── docs/
 │   └── MVP_ENGINEERING.md          # This file
 └── README.md
@@ -459,15 +572,15 @@ pax-venture/
 
 ---
 
-## 11. Implementation Order
+## 12. Implementation Order
 
-### Phase 1: Core Loop (Days 1-2)
+### Phase 1: Core Loop + Memory (Days 1-2)
 1. **LLM integration** — OpenRouter client, generate_events, resolve_decision
-2. **Game engine** — create_player, start_month, submit_decision, end_month
-3. **API routes** — all 8 endpoints
-4. **Fiche 10 creation** — auto-generated on player creation
+2. **3-Layer Memory engine** — GameState JSON, hierarchical memory, importance scoring
+3. **Game engine** — create_player, start_month, submit_decision, end_month
+4. **API routes** — all 8 endpoints (replace `/fiche` with `/memory`)
 
-**Validate**: Can I start a game, get emails, chat a decision, and see a result?
+**Validate**: Can I start a game, get emails, chat a decision, and see memory compaction work?
 
 ### Phase 2: Frontend (Days 2-3)
 5. **Layout** — 3-panel dark theme, no page scroll
@@ -480,13 +593,13 @@ pax-venture/
 ### Phase 3: Competition (Day 3)
 9. **Competitor simulation** — formula-driven, seeded in DB
 10. **Leaderboard** — player + AI, sortable
-11. **Fiche 10 updates** — auto-write after each decision
+11. **Memory compaction** — verify hierarchical compression at M10, M20, M40
 
-**Validate**: Does seeing competitors motivate? Does the leaderboard create tension?
+**Validate**: Does seeing competitors motivate? Does memory stay compact at high months?
 
 ### Phase 4: Polish (Day 4)
 12. **Elimination screen** — cash < $0 game over
-13. **Monthly report** — summary email at end of month
+13. **Memory retrieval** — "what happened with X?" searches decisions by importance
 14. **Chat history** — show past decisions inline
 15. **Error handling** — LLM failures, rate limits
 
@@ -494,7 +607,7 @@ pax-venture/
 
 ---
 
-## 12. What We're NOT Building (Yet)
+## 13. What We're NOT Building (Yet)
 
 | Feature | Why Not Now |
 |---------|-------------|
@@ -508,10 +621,11 @@ pax-venture/
 | Multiple industries | Automotive only, validate the mechanic |
 | Admin dashboard | Not needed for 10 users |
 | Rate limiting | OpenRouter handles it |
+| Vector DB / RAG | SQLite + importance scoring suffices for MVP |
 
 ---
 
-## 13. Success Metric
+## 14. Success Metric
 
 **The only question that matters after someone plays 3 months:**
 

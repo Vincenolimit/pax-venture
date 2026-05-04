@@ -262,48 +262,91 @@ button:disabled {
   color: #725705;
 }
 
-.chat-feed {
-  min-height: 210px;
-  max-height: 360px;
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.panel-title-row span {
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+}
+
+.action-list {
+  min-height: 180px;
+  max-height: 300px;
   overflow: auto;
+  display: grid;
+  gap: 0.55rem;
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 0.6rem;
   background: rgba(255, 255, 255, 0.35);
 }
 
-.msg {
-  margin-bottom: 0.55rem;
-}
-
-.msg p {
-  margin: 0;
-  padding: 0.55rem 0.65rem;
+.action-item {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 0.55rem;
+  align-items: start;
+  border: 1px solid rgba(15, 118, 110, 0.22);
   border-radius: 10px;
-  max-width: 90%;
+  padding: 0.6rem;
+  background: rgba(15, 118, 110, 0.08);
 }
 
-.msg-player p {
-  background: rgba(15, 118, 110, 0.2);
-  margin-left: auto;
+.action-item span {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 700;
 }
 
-.msg-llm p,
-.msg-system p {
-  background: rgba(35, 28, 21, 0.09);
+.action-item p,
+.month-resolution p,
+.empty-state {
+  margin: 0;
 }
 
-.streaming p {
+.empty-state {
+  color: var(--ink-soft);
+}
+
+.month-resolution {
+  margin-top: 0.75rem;
   border-left: 3px solid var(--accent);
+  padding: 0.65rem 0.75rem;
+  background: rgba(255, 255, 255, 0.48);
 }
 
-.impact-line {
-  margin: 0.7rem 0;
+.month-resolution strong {
+  display: block;
+  margin-bottom: 0.35rem;
+}
+
+.month-resolution span {
+  display: block;
+  margin-top: 0.45rem;
   color: var(--ink-soft);
   font-size: 0.9rem;
 }
 
-.chat-compose textarea {
+.action-compose {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.55rem;
+  align-items: stretch;
+  margin-top: 0.75rem;
+}
+
+.action-compose textarea {
   width: 100%;
   min-height: 82px;
   resize: vertical;
@@ -312,6 +355,10 @@ button:disabled {
   padding: 0.6rem;
   background: rgba(255, 255, 255, 0.65);
   font: inherit;
+}
+
+.action-compose button {
+  min-width: 112px;
 }
 
 .tier-row {
@@ -496,5 +543,9 @@ blockquote {
   .col-center,
   .col-right {
     order: 0;
+  }
+
+  .action-compose {
+    grid-template-columns: 1fr;
   }
 }

@@ -7,21 +7,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from app.core.cache import build_cached_system_block, build_dynamic_block
-from app.core.config import COMPETITOR_TEMPLATES, PROMPT_VERSION, QWEN_MODEL, SCHEMA_VERSION
+from app.core.config import COMPETITOR_TEMPLATES, PROMPT_VERSION, QWEN_MODEL
 from app.core.database import get_session
 from app.core.openrouter import call_tool
 from app.core.seed import derive_seed
-from app.core.tools import INBOX_TOOL, RESOLVE_TOOL
-from app.core.validators import validate_generate_inbox_emails, validate_resolve_decision
+from app.core.tools import INBOX_TOOL
+from app.core.validators import validate_generate_inbox_emails
 from app.models.llm_call import LLMCall
-from app.models import Competitor, Decision, DecisionEmbedding, Event, Flag, Industry, Memory, Message, Player, Relationship, Snapshot, Thread
+from app.models import Competitor, Industry, Memory, Message, Player, Relationship, Snapshot
 from app.services.autopsy import generate_autopsy, latest_autopsy
-from app.services.competitors import apply_posture_transitions, end_month_competitor_tick, seeded_rng
+from app.services.competitors import end_month_competitor_tick, seeded_rng
 from app.services.cost import within_cost_cap
-from app.services.embeddings import embed, retrieve
 from app.services.events import append_event, find_by_idem
 from app.services.memory import compact_memory
 from app.services.projection import build_state, rebuild_player_columns
+from app.services.turn_engine import action_events, action_from_event, month_in_play, queue_action, resolve_month_actions
 from app.services.world import apply_mechanical_effects, pending_for_month
 
 router = APIRouter(prefix="/api/v1")
@@ -87,6 +87,28 @@ async def start_month(player_id: str, session: AsyncSession = Depends(get_sessio
             if await find_by_idem(session, player_id, idempotency_key):
                 yield {"event": "done", "data": json.dumps({"replayed": True})}
                 return
+            existing = (await session.scalars(select(Message).where(Message.player_id == player.id, Message.month == month))).all()
+            if existing:
+                yield {
+                    "event": "done",
+                    "data": json.dumps(
+                        {
+                            "month": month,
+                            "emails": [
+                                {
+                                    "id": msg.id,
+                                    "sender": msg.sender,
+                                    "subject": msg.subject,
+                                    "body": msg.body,
+                                    "category": msg.category,
+                                }
+                                for msg in existing
+                            ],
+                            "already_started": True,
+                        }
+                    ),
+                }
+                return
             industry = await session.get(Industry, player.industry_id)
             memory = await session.get(Memory, player.id)
             worlds = await pending_for_month(session, player.industry_id, month)
@@ -113,49 +135,26 @@ async def start_month(player_id: str, session: AsyncSession = Depends(get_sessio
     return EventSourceResponse(stream())
 
 
-@router.post("/players/{player_id}/decide")
-async def decide(player_id: str, body: dict, session: AsyncSession = Depends(get_session), idempotency_key: str = Header(..., alias="Idempotency-Key")):
-    async def stream():
-        try:
-            player = await session.get(Player, player_id)
-            if not player:
-                raise HTTPException(status_code=404, detail="Player not found")
-            month = player.current_month + 1
-            if player.game_over:
-                raise HTTPException(status_code=409, detail="Game is over")
-            if not within_cost_cap(player, 0.10):
-                raise HTTPException(status_code=402, detail="Cost cap reached")
-            if await find_by_idem(session, player_id, idempotency_key):
-                yield {"event": "result", "data": json.dumps({"replayed": True})}
-                return
-            industry = await session.get(Industry, player.industry_id)
-            memory = await session.get(Memory, player.id)
-            inbox = (await session.scalars(select(Message).where(Message.player_id == player.id, Message.month == month))).all()
-            state = await build_state(session, player.id)
-            retrieved = await retrieve(session, player.id, body["text"])
-            dynamic = build_dynamic_block(state, memory.recent, [], [f"M{r['decision_id']} {r['decision_text'][:60]}" for r in retrieved], [f"[{m.id}] {m.subject}" for m in inbox], f"Call the resolve_decision tool now.\n{body['text']}")
-            model = _resolve_model(industry, player.model_tier)
-            result = await call_tool("resolve_decision", model, [{"role": "system", "content": [{"type": "text", "text": industry.system_prompt_template}]}, {"role": "user", "content": dynamic}], RESOLVE_TOOL, cache_control_on_system=True, seed=derive_seed(player.id, month, 1), session=session, player_id=player.id)
-            active_threads = (await session.scalars(select(Thread).where(Thread.player_id == player.id, Thread.status == "active"))).all()
-            cleaned, _ = validate_resolve_decision(industry, result.args, [t.label for t in active_threads])
-            for token in cleaned["narrative"].split(" "):
-                yield {"event": "narrative.chunk", "data": json.dumps({"text": token + " "})}
-            decision = Decision(player_id=player.id, month=month, seq_in_month=1, decision_text=body["text"], inbox_ref_ids=json.dumps(body.get("inbox_ref_ids", [])), narrative=cleaned["narrative"], importance=cleaned["importance"], cash_impact=cleaned["cash_impact"], revenue_impact=cleaned["revenue_impact"], market_impact=cleaned["market_impact"], employees_change=cleaned["employees_change"], prompt_version=PROMPT_VERSION, schema_version=SCHEMA_VERSION, model=model, seed=derive_seed(player.id, month, 1), cost_usd=result.cost_usd, latency_ms=result.latency_ms, cache_hit=(result.cached_tokens > 0))
-            session.add(decision)
-            await session.flush()
-            session.add(DecisionEmbedding(decision_id=decision.id, player_id=player.id, model="voyage-3-lite", dim=512, vector=(await embed(session, body["text"]))))
-            await append_event(session, player.id, "DECISION_PROPOSED", "player", {"text": body["text"]}, month=month)
-            await append_event(session, player.id, "DECISION_RESOLVED", "llm", cleaned, month=month, idempotency_key=idempotency_key, model=model, seed=derive_seed(player.id, month, 1))
-            await rebuild_player_columns(session, player.id)
-            player.cost_spent_usd += result.cost_usd
-            await session.commit()
-            yield {"event": "result", "data": json.dumps({**cleaned, "updated_state": await build_state(session, player.id), "cost_usd": result.cost_usd})}
-        except HTTPException as exc:
-            yield {"event": "error", "data": json.dumps(_sse_error_payload("INTERNAL_ERROR", str(exc.detail), False, idempotency_key))}
-        except Exception as exc:
-            yield {"event": "error", "data": json.dumps(_sse_error_payload("INTERNAL_ERROR", f"Unexpected streaming failure: {str(exc)[:220]}", True, idempotency_key))}
+@router.get("/players/{player_id}/actions")
+async def get_actions(player_id: str, month: int | None = Query(default=None), session: AsyncSession = Depends(get_session)):
+    player = await session.get(Player, player_id)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+    target_month = month if month is not None else month_in_play(player)
+    actions = await action_events(session, player, target_month)
+    return {"player_id": player.id, "month": target_month, "actions": [action_from_event(event) for event in actions]}
 
-    return EventSourceResponse(stream())
+
+@router.post("/players/{player_id}/actions")
+async def submit_action(player_id: str, body: dict, session: AsyncSession = Depends(get_session), idempotency_key: str = Header(..., alias="Idempotency-Key")):
+    player = await session.get(Player, player_id)
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+    if player.game_over:
+        raise HTTPException(status_code=409, detail="Game is over")
+    event, replayed = await queue_action(session, player, body, idempotency_key)
+    await session.commit()
+    return {"player_id": player.id, "month": event.month, "action": action_from_event(event), "replayed": replayed}
 
 
 @router.post("/players/{player_id}/end-month")
@@ -171,14 +170,21 @@ async def end_month(player_id: str, session: AsyncSession = Depends(get_session)
         raise HTTPException(status_code=409, detail="Game is over")
     month = player.current_month + 1
     industry = await session.get(Industry, player.industry_id)
+    memory = await session.get(Memory, player.id)
     worlds = await pending_for_month(session, player.industry_id, month)
+    actions = await action_events(session, player, month)
+    decision_result = None
+    if actions:
+        if not within_cost_cap(player, 0.10):
+            raise HTTPException(status_code=402, detail="Cost cap reached")
+        decision_result = await resolve_month_actions(session, player, industry, memory, month, actions, worlds)
     await apply_mechanical_effects(session, player, month, worlds)
     fin = json.loads(industry.financial_constants)
     burn = player.employees * fin["payroll_per_employee"] + fin["base_overhead"]
     await append_event(session, player.id, "FINANCES_APPLIED", "kernel", {"burn": burn, "revenue": player.revenue}, month=month)
     for comp in (await session.scalars(select(Competitor).where(Competitor.player_id == player.id))).all():
         end_month_competitor_tick(comp, player, month, seeded_rng(player, comp))
-    await compact_memory(session, player, industry)
+    await compact_memory(session, player, industry, month)
     await rebuild_player_columns(session, player.id)
     rank = int((await session.scalar(select(func.count()).select_from(Player).where(Player.cash > player.cash))) or 0) + 1
     session.add(Snapshot(player_id=player.id, month=month, cash=player.cash, revenue=player.revenue, market_share=player.market_share, employees=player.employees, burn_rate=burn, leaderboard_rank=rank))
@@ -188,7 +194,19 @@ async def end_month(player_id: str, session: AsyncSession = Depends(get_session)
         player.eliminated_at = player.current_month
         autopsy = await generate_autopsy(session, player)
         await append_event(session, player.id, "AUTOPSY_GENERATED", "llm", autopsy, month=month)
-    result = {"month": player.current_month, "cash": player.cash, "revenue": player.revenue, "market_share": player.market_share, "burn_rate": burn, "employees": player.employees, "game_over": bool(player.game_over), "world_events_fired": [{"event_id": w.id, "severity": w.severity} for w in worlds], "memory_compacted": True}
+    result = {
+        "month": player.current_month,
+        "cash": player.cash,
+        "revenue": player.revenue,
+        "market_share": player.market_share,
+        "burn_rate": burn,
+        "employees": player.employees,
+        "game_over": bool(player.game_over),
+        "decision": decision_result,
+        "actions_resolved": [action_from_event(event) for event in actions],
+        "world_events_fired": [{"event_id": w.id, "severity": w.severity} for w in worlds],
+        "memory_compacted": True,
+    }
     await append_event(session, player.id, "MONTH_ENDED", "kernel", {"month": player.current_month, "result": result}, month=month, idempotency_key=idempotency_key)
     await session.commit()
     return result

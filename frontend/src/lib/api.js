@@ -42,12 +42,17 @@ export function startMonthStream(playerId) {
   });
 }
 
-export function decideStream(playerId, payload) {
-  return openEventStream(`${API_BASE}/players/${playerId}/decide`, {
+export function submitAction(playerId, payload) {
+  return request(`/players/${playerId}/actions`, {
     method: "POST",
     headers: { "Idempotency-Key": uid() },
-    body: payload,
+    body: JSON.stringify(payload),
   });
+}
+
+export function getActions(playerId, month) {
+  const query = month == null ? "" : `?month=${month}`;
+  return request(`/players/${playerId}/actions${query}`);
 }
 
 export function endMonth(playerId) {

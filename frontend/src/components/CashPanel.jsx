@@ -6,7 +6,7 @@ function money(value) {
   }).format(value ?? 0);
 }
 
-export default function CashPanel({ player, derived, onStartMonth, onEndMonth, disabled, busyAction }) {
+export default function CashPanel({ player, derived, onStartMonth, onEndMonth, disabled, monthStarted, busyAction }) {
   return (
     <section className="panel panel-cash">
       <h2>Command Deck</h2>
@@ -31,11 +31,11 @@ export default function CashPanel({ player, derived, onStartMonth, onEndMonth, d
       </div>
       <div className={`runway runway-${derived.cash_runway}`}>Runway: {derived.cash_runway}</div>
       <div className="actions-row">
-        <button type="button" onClick={onStartMonth} disabled={disabled}>
-          {busyAction === "start" ? "Starting..." : "Start Month"}
+        <button type="button" onClick={onStartMonth} disabled={disabled || monthStarted}>
+          {busyAction === "start" ? "Opening..." : monthStarted ? "Month Open" : "Open Month"}
         </button>
         <button type="button" onClick={onEndMonth} disabled={disabled}>
-          {busyAction === "end" ? "Ending..." : "End Month"}
+          {busyAction === "end" ? "Simulating..." : "Simulate Month"}
         </button>
       </div>
     </section>

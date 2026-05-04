@@ -2,11 +2,11 @@
 
 **Business simulation — you're the CEO. Decide. Compete. Dominate.**
 
-Month-by-month competitive business sim where you chat with an LLM to run your company. One interface: **Inbox** (emails/events) + **Leaderboard** + **Cash Position**. Each player has a **Fiche 10** — a markdown profile the LLM reads to tailor decisions and events.
+Month-by-month competitive business sim where you queue CEO actions, then simulate the month. One interface: **Inbox** (emails/events) + **Action Plan** + **Leaderboard** + **Cash Position**. Each player has a **Fiche 10** — a markdown profile the LLM reads to tailor decisions and events.
 
 ## Concept
 
-- **Turn-based**: Each turn = 1 month. React to inbox, make decisions, see results.
+- **Turn-based**: Each turn = 1 month. React to inbox, queue actions, see results.
 - **LLM-powered**: The AI plays the role of market, board, competitors, regulators. It reads your Fiche 10 to personalize the experience.
 - **Competitive**: Leaderboard shows cash, revenue, and market position vs other players.
 - **Minimal UI**: Single screen — no page scrolling. Football Manager style.
@@ -45,7 +45,7 @@ backend/
     services/     # Business logic (game engine, LLM orchestrator)
 frontend/
   src/
-    components/   # Inbox, Leaderboard, CashPanel, ChatBubble
+    components/   # Inbox, Leaderboard, CashPanel, ActionPanel
     hooks/        # useWebSocket, useChat, useGame
     pages/        # MainGame (single-screen layout)
 data/
@@ -89,7 +89,7 @@ The LLM reads this file each turn to generate contextual events, opponents' move
 ## Game Flow
 
 1. **Month starts** → Inbox populates with emails (market news, board requests, supplier offers)
-2. **Player chats** with LLM to make decisions (invest, cut costs, hire, expand, etc.)
-3. **Player submits "End Month"** → LLM simulates outcomes
+2. **Player queues actions** (invest, cut costs, hire, expand, etc.)
+3. **Player submits "Simulate Month"** → LLM reads the action plan and simulates outcomes
 4. **Results arrive** → Cash updates, leaderboard shifts, new events trigger
 5. **Repeat** — 12-24 month campaign, highest cash wins

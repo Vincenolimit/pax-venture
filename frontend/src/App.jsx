@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import ActionPanel from "./components/ActionPanel.jsx";
 import AutopsyCard from "./components/AutopsyCard.jsx";
 import CashPanel from "./components/CashPanel.jsx";
-import ChatPanel from "./components/ChatPanel.jsx";
 import CostBadge from "./components/CostBadge.jsx";
 import Inbox from "./components/Inbox.jsx";
 import Leaderboard from "./components/Leaderboard.jsx";
@@ -10,8 +10,8 @@ import ModelPicker from "./components/ModelPicker.jsx";
 import NewPlayerModal from "./components/NewPlayerModal.jsx";
 import {
   createPlayer,
-  decideStream,
   endMonth,
+  getActions,
   getAutopsy,
   getCost,
   getLeaderboard,
@@ -20,6 +20,7 @@ import {
   markMessageRead,
   patchPlayer,
   startMonthStream,
+  submitAction,
 } from "./lib/api";
 
 function monthInPlay(state) {
@@ -76,8 +77,8 @@ function GameApp() {
   const [cost, setCost] = useState({ cost_spent_usd: 0, cost_cap_usd: null, cap_percent: 0 });
   const [autopsy, setAutopsy] = useState(null);
   const [selectedMessageId, setSelectedMessageId] = useState(null);
-  const [transcript, setTranscript] = useState([]);
-  const [liveNarrative, setLiveNarrative] = useState("");
+  const [actions, setActions] = useState([]);
+  const [resolution, setResolution] = useState("");
   const [resultLine, setResultLine] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -88,14 +89,16 @@ function GameApp() {
   const interactionDisabled = !playerId || !state || !!state.player.game_over || capReached;
 
   const loadSupplemental = useCallback(async (pid, currentState) => {
-    const [leaderboard, costState, messages] = await Promise.all([
+    const [leaderboard, costState, messages, actionState] = await Promise.all([
       getLeaderboard(),
       getCost(pid),
       getMessages(pid, monthInPlay(currentState)),
+      getActions(pid, monthInPlay(currentState)),
     ]);
     setLeaderboardRows(leaderboard.rows || []);
     setCost(costState);
     setInbox(messages.messages || []);
+    setActions(actionState.actions || []);
   }, []);
 
   const reloadPlayer = useCallback(
@@ -121,7 +124,19 @@ function GameApp() {
     if (!playerId) {
       return;
     }
-    reloadPlayer(playerId).catch((err) => setError(String(err.message || err)));
+    reloadPlayer(playerId).catch((err) => {
+      const message = String(err.message || err);
+      if (message.includes("Player not found")) {
+        window.localStorage.removeItem("player_id");
+        setPlayerId("");
+        setState(null);
+        setInbox([]);
+        setActions([]);
+        setSelectedMessageId(null);
+        return;
+      }
+      setError(message);
+    });
   }, [playerId, reloadPlayer]);
 
   const handleCreatePlayer = async (payload) => {
@@ -132,8 +147,8 @@ function GameApp() {
       const pid = created.player.id;
       setPlayerId(pid);
       setState(created);
-      setTranscript([]);
-      setLiveNarrative("");
+      setActions([]);
+      setResolution("");
       setResultLine("");
       setAutopsy(null);
       window.localStorage.setItem("player_id", pid);
@@ -157,6 +172,7 @@ function GameApp() {
     }
     setBusyAction("start");
     setError("");
+    setResolution("");
     setResultLine("");
     try {
       const stream = startMonthStream(playerId);
@@ -176,43 +192,20 @@ function GameApp() {
     }
   };
 
-  const handleDecision = async (text) => {
+  const handleSubmitAction = async (text) => {
     if (interactionDisabled) {
       return;
     }
-    setBusyAction("decide");
+    setBusyAction("action");
     setError("");
     setResultLine("");
-    setLiveNarrative("");
-    setTranscript((prev) => [...prev, { role: "player", text }]);
+    setResolution("");
     try {
-      const stream = decideStream(playerId, {
+      const payload = await submitAction(playerId, {
         text,
         inbox_ref_ids: selectedMessageId ? [selectedMessageId] : [],
       });
-      let finalNarrative = "";
-      for await (const event of stream) {
-        if (event.event === "narrative.chunk" && event.data?.text) {
-          finalNarrative += event.data.text;
-          setLiveNarrative(finalNarrative);
-        }
-        if (event.event === "result" && event.data) {
-          const narrative = event.data.narrative || finalNarrative;
-          setTranscript((prev) => [...prev, { role: "llm", text: narrative }]);
-          setLiveNarrative("");
-          setResultLine(formatImpactLine(event.data));
-          if (event.data.updated_state) {
-            setState(event.data.updated_state);
-            await loadSupplemental(playerId, event.data.updated_state);
-            if (event.data.updated_state.player.game_over) {
-              setAutopsy(await getAutopsy(playerId));
-            }
-          }
-        }
-        if (event.event === "error" && event.data) {
-          setError(event.data.message || "Decision request failed");
-        }
-      }
+      setActions((prev) => (prev.some((action) => action.id === payload.action.id) ? prev : [...prev, payload.action]));
     } catch (err) {
       setError(String(err.message || err));
     } finally {
@@ -229,7 +222,8 @@ function GameApp() {
     setResultLine("");
     try {
       const result = await endMonth(playerId);
-      setTranscript((prev) => [...prev, { role: "system", text: `Month ${result.month} closed. Cash now ${Math.round(result.cash).toLocaleString()}.` }]);
+      setResolution(result.decision?.narrative || `Month ${result.month} closed.`);
+      setResultLine(result.decision ? formatImpactLine(result.decision) : "");
       await reloadPlayer(playerId);
     } catch (err) {
       setError(String(err.message || err));
@@ -271,8 +265,8 @@ function GameApp() {
     setInbox([]);
     setLeaderboardRows([]);
     setAutopsy(null);
-    setTranscript([]);
-    setLiveNarrative("");
+    setActions([]);
+    setResolution("");
     setResultLine("");
     setSelectedMessageId(null);
   };
@@ -292,7 +286,8 @@ function GameApp() {
               derived={state.derived}
               onStartMonth={handleStartMonth}
               onEndMonth={handleEndMonth}
-              disabled={interactionDisabled || busyAction === "decide" || busyAction === "start" || busyAction === "end"}
+              disabled={interactionDisabled || busyAction === "action" || busyAction === "start" || busyAction === "end"}
+              monthStarted={inbox.length > 0}
               busyAction={busyAction}
             />
           ) : (
@@ -302,13 +297,13 @@ function GameApp() {
         </aside>
         <section className="col-center">
           <Inbox messages={inbox} activeId={selectedMessageId} onOpen={handleOpenMessage} />
-          <ChatPanel
-            transcript={transcript}
-            liveNarrative={liveNarrative}
+          <ActionPanel
+            actions={actions}
+            resolution={resolution}
             resultLine={resultLine}
-            onSubmitDecision={handleDecision}
+            onSubmitAction={handleSubmitAction}
             disabled={interactionDisabled}
-            busy={busyAction === "decide" || loading}
+            busy={busyAction === "action" || loading}
           />
         </section>
         <aside className="col-right">

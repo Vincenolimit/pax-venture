@@ -263,6 +263,18 @@ competitors
   cash REAL
   revenue REAL
   market_share REAL
+
+-- Leaderboard (pre-computed, updated after each end-month)
+leaderboard
+  id INT PK AUTOINCREMENT
+  player_id TEXT                          -- references player OR competitor id
+  company_name TEXT
+  type TEXT                               -- "player" or "competitor"
+  cash REAL
+  revenue REAL
+  market_share REAL
+  current_month INT
+  rank INT
 ```
 
 ### What Changed vs. Original Design
@@ -270,10 +282,10 @@ competitors
 | Before | After | Why |
 |--------|-------|-----|
 | `monthly_reports` table | Removed | `game_states` JSON + `memories` replaces it with less schema |
-| `leaderboard` table | Removed | Denormalized — computed on the fly from players + competitors |
 | Fiche 10 `.md` file | `game_states` JSON + `memories` table | Structured state is more compact and deterministic |
 | `decisions.importance` | New field | Enables importance-weighted retrieval (Layer 3) |
 | `competitors.cash/revenue/market_share` | New fields | Competitors need persistent state between months |
+| `leaderboard` table | **Kept** — added `type` field | Pre-computed rankings = fast reads on most-hit endpoint |
 
 ---
 

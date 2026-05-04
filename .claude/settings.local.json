@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:openrouter.ai)",
+      "WebFetch(domain:thetokencompany.com)",
+      "WebFetch(domain:www.startuphub.ai)",
+      "WebFetch(domain:gist.github.com)"
+    ]
+  }
+}

@@ -29,3 +29,4 @@ Thumbs.db
 
 # Data (player fiches are tracked, runtime DB is not)
 data/runtime/
+backend/data/

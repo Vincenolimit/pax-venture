@@ -5,7 +5,12 @@
       "WebFetch(domain:openrouter.ai)",
       "WebFetch(domain:thetokencompany.com)",
       "WebFetch(domain:www.startuphub.ai)",
-      "WebFetch(domain:gist.github.com)"
+      "WebFetch(domain:gist.github.com)",
+      "Bash(rm -rf C:/Users/Shadow/Pax/pax-venture/backend/app/core/__pycache__)",
+      "Bash(rm -f C:/Users/Shadow/Pax/pax-venture/backend/app/core/cache.py C:/Users/Shadow/Pax/pax-venture/backend/app/core/compression.py C:/Users/Shadow/Pax/pax-venture/backend/app/core/database.py C:/Users/Shadow/Pax/pax-venture/backend/app/core/seed.py C:/Users/Shadow/Pax/pax-venture/backend/app/core/tools.py C:/Users/Shadow/Pax/pax-venture/backend/app/core/validators.py)",
+      "Bash(python -c \"from app.main import app; print\\('OK', len\\(app.routes\\), 'routes'\\)\")",
+      "Bash(npm uninstall *)",
+      "Bash(npm run *)"
     ]
   }
 }

@@ -1,327 +1,253 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
-import ActionPanel from "./components/ActionPanel.jsx";
-import AutopsyCard from "./components/AutopsyCard.jsx";
-import CashPanel from "./components/CashPanel.jsx";
-import CostBadge from "./components/CostBadge.jsx";
-import Inbox from "./components/Inbox.jsx";
-import Leaderboard from "./components/Leaderboard.jsx";
-import ModelPicker from "./components/ModelPicker.jsx";
-import NewPlayerModal from "./components/NewPlayerModal.jsx";
-import {
-  createPlayer,
-  endMonth,
-  getActions,
-  getAutopsy,
-  getCost,
-  getLeaderboard,
-  getMessages,
-  getState,
-  markMessageRead,
-  patchPlayer,
-  startMonthStream,
-  submitAction,
-} from "./lib/api";
+const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-function monthInPlay(state) {
-  return (state?.player?.current_month ?? 0) + 1;
-}
+const money = (v) =>
+  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(v ?? 0);
 
-function formatImpactLine(result) {
-  if (!result) {
-    return "";
+const signed = (v) => `${v >= 0 ? "+" : ""}${money(v)}`;
+
+async function api(path, opts = {}) {
+  const res = await fetch(`${API}${path}`, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `HTTP ${res.status}`);
   }
-  const cash = Number(result.cash_impact ?? 0);
-  const revenue = Number(result.revenue_impact ?? 0);
-  const market = Number(result.market_impact ?? 0);
-  const employees = Number(result.employees_change ?? 0);
-  return `${cash >= 0 ? "+" : ""}${cash.toLocaleString()} cash, ${revenue >= 0 ? "+" : ""}${revenue.toLocaleString()} rev/mo, ${market >= 0 ? "+" : ""}${market}% share, ${employees >= 0 ? "+" : ""}${employees} employees`;
+  return res.json();
 }
 
-function PublicAutopsyView({ playerId }) {
-  const [autopsy, setAutopsy] = useState(null);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    let active = true;
-    getAutopsy(playerId)
-      .then((payload) => {
-        if (active) {
-          setAutopsy(payload);
-        }
-      })
-      .catch((err) => {
-        if (active) {
-          setError(String(err.message || err));
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [playerId]);
-
-  return (
-    <main className="public-autopsy">
-      <h1>Pax Venture - Autopsy</h1>
-      {error ? <p className="error-banner">{error}</p> : null}
-      <AutopsyCard autopsy={autopsy} playerId={playerId} onPlayAgain={() => (window.location.href = "/")} />
-    </main>
-  );
-}
-
-function GameApp() {
-  const [playerId, setPlayerId] = useState(() => window.localStorage.getItem("player_id") || "");
+export default function App() {
+  const [gameId, setGameId] = useState(() => localStorage.getItem("game_id") || "");
   const [state, setState] = useState(null);
-  const [inbox, setInbox] = useState([]);
-  const [leaderboardRows, setLeaderboardRows] = useState([]);
-  const [cost, setCost] = useState({ cost_spent_usd: 0, cost_cap_usd: null, cap_percent: 0 });
-  const [autopsy, setAutopsy] = useState(null);
-  const [selectedMessageId, setSelectedMessageId] = useState(null);
-  const [actions, setActions] = useState([]);
-  const [resolution, setResolution] = useState("");
-  const [resultLine, setResultLine] = useState("");
+  const [draft, setDraft] = useState("");
+  const [companyDraft, setCompanyDraft] = useState("Pax Motors");
+  const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [busyAction, setBusyAction] = useState("");
-
-  const capReached = useMemo(() => Number(cost.cap_percent ?? 0) >= 100, [cost.cap_percent]);
-  const interactionDisabled = !playerId || !state || !!state.player.game_over || capReached;
-
-  const loadSupplemental = useCallback(async (pid, currentState) => {
-    const [leaderboard, costState, messages, actionState] = await Promise.all([
-      getLeaderboard(),
-      getCost(pid),
-      getMessages(pid, monthInPlay(currentState)),
-      getActions(pid, monthInPlay(currentState)),
-    ]);
-    setLeaderboardRows(leaderboard.rows || []);
-    setCost(costState);
-    setInbox(messages.messages || []);
-    setActions(actionState.actions || []);
-  }, []);
-
-  const reloadPlayer = useCallback(
-    async (pid) => {
-      setLoading(true);
-      try {
-        const nextState = await getState(pid);
-        setState(nextState);
-        await loadSupplemental(pid, nextState);
-        if (nextState.player.game_over) {
-          setAutopsy(await getAutopsy(pid));
-        } else {
-          setAutopsy(null);
-        }
-      } finally {
-        setLoading(false);
-      }
-    },
-    [loadSupplemental],
-  );
 
   useEffect(() => {
-    if (!playerId) {
-      return;
-    }
-    reloadPlayer(playerId).catch((err) => {
-      const message = String(err.message || err);
-      if (message.includes("Player not found")) {
-        window.localStorage.removeItem("player_id");
-        setPlayerId("");
-        setState(null);
-        setInbox([]);
-        setActions([]);
-        setSelectedMessageId(null);
-        return;
-      }
-      setError(message);
-    });
-  }, [playerId, reloadPlayer]);
-
-  const handleCreatePlayer = async (payload) => {
-    setCreating(true);
-    setError("");
-    try {
-      const created = await createPlayer(payload);
-      const pid = created.player.id;
-      setPlayerId(pid);
-      setState(created);
-      setActions([]);
-      setResolution("");
-      setResultLine("");
-      setAutopsy(null);
-      window.localStorage.setItem("player_id", pid);
-      await loadSupplemental(pid, created);
-    } catch (err) {
-      setError(String(err.message || err));
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  const handleOpenMessage = (message) => {
-    setSelectedMessageId(message.id);
-    setInbox((prev) => prev.map((item) => (item.id === message.id ? { ...item, is_read: true } : item)));
-    markMessageRead(playerId, message.id, true).catch(() => {});
-  };
-
-  const handleStartMonth = async () => {
-    if (interactionDisabled) {
-      return;
-    }
-    setBusyAction("start");
-    setError("");
-    setResolution("");
-    setResultLine("");
-    try {
-      const stream = startMonthStream(playerId);
-      for await (const event of stream) {
-        if (event.event === "email" && event.data) {
-          setInbox((prev) => [...prev, { ...event.data, is_read: false }]);
-        }
-        if (event.event === "error" && event.data) {
-          setError(event.data.message || "Failed to start month");
-        }
-      }
-      await reloadPlayer(playerId);
-    } catch (err) {
-      setError(String(err.message || err));
-    } finally {
-      setBusyAction("");
-    }
-  };
-
-  const handleSubmitAction = async (text) => {
-    if (interactionDisabled) {
-      return;
-    }
-    setBusyAction("action");
-    setError("");
-    setResultLine("");
-    setResolution("");
-    try {
-      const payload = await submitAction(playerId, {
-        text,
-        inbox_ref_ids: selectedMessageId ? [selectedMessageId] : [],
+    if (!gameId) return;
+    api(`/api/game/${gameId}`)
+      .then(setState)
+      .catch(() => {
+        localStorage.removeItem("game_id");
+        setGameId("");
       });
-      setActions((prev) => (prev.some((action) => action.id === payload.action.id) ? prev : [...prev, payload.action]));
-    } catch (err) {
-      setError(String(err.message || err));
+  }, [gameId]);
+
+  const startGame = async () => {
+    setBusy("new");
+    setError("");
+    try {
+      const game = await api("/api/game", {
+        method: "POST",
+        body: JSON.stringify({ company_name: companyDraft.trim() || "Pax Motors" }),
+      });
+      localStorage.setItem("game_id", game.id);
+      setGameId(game.id);
+      setState(game);
+    } catch (e) {
+      setError(String(e.message || e));
     } finally {
-      setBusyAction("");
+      setBusy("");
     }
   };
 
-  const handleEndMonth = async () => {
-    if (interactionDisabled) {
-      return;
-    }
-    setBusyAction("end");
+  const addAction = async (e) => {
+    e.preventDefault();
+    const text = draft.trim();
+    if (!text) return;
+    setBusy("add");
     setError("");
-    setResultLine("");
     try {
-      const result = await endMonth(playerId);
-      setResolution(result.decision?.narrative || `Month ${result.month} closed.`);
-      setResultLine(result.decision ? formatImpactLine(result.decision) : "");
-      await reloadPlayer(playerId);
-    } catch (err) {
-      setError(String(err.message || err));
+      const next = await api(`/api/game/${gameId}/action`, {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      });
+      setState(next);
+      setDraft("");
+    } catch (e) {
+      setError(String(e.message || e));
     } finally {
-      setBusyAction("");
+      setBusy("");
     }
   };
 
-  const handleModelTierChange = async (tier) => {
-    if (!playerId || !state || tier === state.player.model_tier) {
-      return;
-    }
+  const removeAction = async (index) => {
     setError("");
     try {
-      const payload = await patchPlayer(playerId, { model_tier: tier });
-      setState((prev) => ({ ...prev, player: { ...prev.player, model_tier: payload.model_tier } }));
-    } catch (err) {
-      setError(String(err.message || err));
+      const next = await api(`/api/game/${gameId}/action/${index}`, { method: "DELETE" });
+      setState(next);
+    } catch (e) {
+      setError(String(e.message || e));
     }
   };
 
-  const handleCostCapChange = async (nextCap) => {
-    if (!playerId) {
-      return;
-    }
+  const simulate = async () => {
+    setBusy("sim");
     setError("");
     try {
-      await patchPlayer(playerId, { cost_cap_usd: nextCap });
-      await reloadPlayer(playerId);
-    } catch (err) {
-      setError(String(err.message || err));
+      const next = await api(`/api/game/${gameId}/simulate`, { method: "POST" });
+      setState(next);
+    } catch (e) {
+      setError(String(e.message || e));
+    } finally {
+      setBusy("");
     }
   };
 
-  const handlePlayAgain = () => {
-    window.localStorage.removeItem("player_id");
-    setPlayerId("");
+  const reset = () => {
+    localStorage.removeItem("game_id");
+    setGameId("");
     setState(null);
-    setInbox([]);
-    setLeaderboardRows([]);
-    setAutopsy(null);
-    setActions([]);
-    setResolution("");
-    setResultLine("");
-    setSelectedMessageId(null);
   };
+
+  if (!gameId || !state) {
+    return (
+      <main className="app-shell start-screen">
+        <header className="topbar">
+          <h1>Pax Venture</h1>
+          <p>Write actions. Simulate the month. The LLM runs the world.</p>
+        </header>
+        {error ? <p className="error-banner">{error}</p> : null}
+        <section className="panel start-card">
+          <h2>New Game</h2>
+          <input
+            value={companyDraft}
+            onChange={(e) => setCompanyDraft(e.target.value)}
+            placeholder="Company name"
+          />
+          <button type="button" onClick={startGame} disabled={busy === "new"}>
+            {busy === "new" ? "Starting..." : "Start Company"}
+          </button>
+        </section>
+      </main>
+    );
+  }
+
+  const lastTurn = state.history[state.history.length - 1];
 
   return (
     <main className="app-shell">
       <header className="topbar">
         <h1>Pax Venture</h1>
-        <p>Inbox. Decisions. Consequences.</p>
+        <p>
+          {state.company_name} — Month {state.month}
+          <button type="button" className="link" onClick={reset}>
+            new game
+          </button>
+        </p>
       </header>
       {error ? <p className="error-banner">{error}</p> : null}
       <div className="layout-grid">
         <aside className="col-left">
-          {state ? (
-            <CashPanel
-              player={state.player}
-              derived={state.derived}
-              onStartMonth={handleStartMonth}
-              onEndMonth={handleEndMonth}
-              disabled={interactionDisabled || busyAction === "action" || busyAction === "start" || busyAction === "end"}
-              monthStarted={inbox.length > 0}
-              busyAction={busyAction}
-            />
-          ) : (
-            <section className="panel">Preparing game state...</section>
-          )}
-          <Leaderboard rows={leaderboardRows} playerId={playerId} />
+          <section className="panel panel-cash">
+            <h2>Position</h2>
+            <div className="kpi-grid">
+              <div>
+                <span>Cash</span>
+                <strong>{money(state.cash)}</strong>
+              </div>
+              <div>
+                <span>Revenue / Mo</span>
+                <strong>{money(state.revenue)}</strong>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="simulate-btn"
+              onClick={simulate}
+              disabled={busy === "sim"}
+            >
+              {busy === "sim" ? "Simulating..." : `Simulate Month ${state.month + 1}`}
+            </button>
+          </section>
+
+          <section className="panel">
+            <h2>Leaderboard</h2>
+            <ul className="leaderboard">
+              {state.leaderboard.map((row, i) => (
+                <li key={row.name} className={row.is_player ? "is-you" : ""}>
+                  <div>
+                    <span className="rank">#{i + 1}</span>
+                    <strong>{row.name}</strong>
+                  </div>
+                  <span>{money(row.cash)}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
         </aside>
+
         <section className="col-center">
-          <Inbox messages={inbox} activeId={selectedMessageId} onOpen={handleOpenMessage} />
-          <ActionPanel
-            actions={actions}
-            resolution={resolution}
-            resultLine={resultLine}
-            onSubmitAction={handleSubmitAction}
-            disabled={interactionDisabled}
-            busy={busyAction === "action" || loading}
-          />
+          <section className="panel">
+            <div className="panel-title-row">
+              <h2>Action Plan</h2>
+              <span>{state.actions.length} queued</span>
+            </div>
+            <div className="action-list">
+              {state.actions.length ? (
+                state.actions.map((text, i) => (
+                  <article key={`${i}-${text}`} className="action-item">
+                    <span>{i + 1}</span>
+                    <p>{text}</p>
+                    <button type="button" className="remove" onClick={() => removeAction(i)}>
+                      ×
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className="empty-state">No actions queued. Write what you want to do this month.</p>
+              )}
+            </div>
+            <form className="action-compose" onSubmit={addAction}>
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder="e.g. Launch fleet pilot with two logistics customers"
+                disabled={busy === "add"}
+              />
+              <button type="submit" disabled={busy === "add" || !draft.trim()}>
+                {busy === "add" ? "Adding..." : "Add"}
+              </button>
+            </form>
+          </section>
+
+          {lastTurn ? (
+            <section className="panel panel-month">
+              <div className="panel-title-row">
+                <h2>Month {lastTurn.month}</h2>
+                <div className="impact-row">
+                  <span>Cash {signed(lastTurn.player_cash_delta)}</span>
+                  <span>Revenue {signed(lastTurn.player_revenue_delta)}</span>
+                </div>
+              </div>
+              {[lastTurn.your_move, lastTurn.competitor_spotlight, lastTurn.market]
+                .filter((s) => s && (s.title || s.body))
+                .map((s, i) => (
+                  <article key={i} className="story-card">
+                    <h3>{s.title}</h3>
+                    <p>{s.body}</p>
+                  </article>
+                ))}
+              {lastTurn.competitor_actions?.length ? (
+                <details className="competitor-actions-wrap">
+                  <summary>What competitors did this month</summary>
+                  <ul className="competitor-actions">
+                    {lastTurn.competitor_actions.map((c) => (
+                      <li key={c.name}>
+                        <strong>{c.name}:</strong> {c.action}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
+            </section>
+          ) : null}
         </section>
-        <aside className="col-right">
-          <ModelPicker value={state?.player?.model_tier || "balanced"} onChange={handleModelTierChange} disabled={!state || loading} />
-          <CostBadge cost={cost} onCapChange={handleCostCapChange} disabled={!state || loading} />
-          {state?.player?.game_over ? <AutopsyCard autopsy={autopsy} playerId={playerId} onPlayAgain={handlePlayAgain} /> : null}
-        </aside>
       </div>
-      {!playerId ? <NewPlayerModal onCreate={handleCreatePlayer} creating={creating} /> : null}
     </main>
   );
-}
-
-export default function App() {
-  const path = window.location.pathname;
-  if (path.startsWith("/autopsy/")) {
-    const playerId = path.replace("/autopsy/", "").trim();
-    return <PublicAutopsyView playerId={playerId} />;
-  }
-  return <GameApp />;
 }

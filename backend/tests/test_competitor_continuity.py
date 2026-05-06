@@ -2,6 +2,7 @@ from app.main import (
     apply_active_initiatives,
     apply_competitor_initiatives,
     apply_resolution,
+    ensure_game_shape,
     memory_context,
     new_game_state,
     quiet_player_result,
@@ -71,3 +72,45 @@ def test_competitor_actions_are_added_to_player_memory_context():
     assert context["competitor_memory"]
     assert any("Tesla opened" in line for line in context["competitor_memory"])
     assert any("Tesla continued" in line for line in context["competitor_memory"])
+
+
+def test_new_competitor_threads_avoid_same_active_initiative_when_possible():
+    game = new_game_state("Pax Motors", "Vincent")
+    game["id"] = "53dc173ab391"
+
+    results = resolve_competitors_locally(game)
+    opened = [result["initiative"] for result in results if result["initiative_status"] == "opened"]
+
+    assert len(opened) == 3
+    assert len(opened) == len(set(opened))
+
+
+def test_existing_duplicate_competitor_threads_are_diversified_on_shape_repair():
+    game = new_game_state("Pax Motors", "Vincent")
+    game["id"] = "duplicate-thread-repair"
+    game["month"] = 7
+    for comp in game["competitors"][:3]:
+        comp["initiatives"] = [
+            {
+                "name": "Factory Conversion",
+                "monthly_cash_delta": -100_000,
+                "monthly_revenue_delta": 40_000,
+                "monthly_market_cap_delta": 250_000,
+                "remaining_months": 2,
+                "started_month": 1,
+                "elapsed_months": 5,
+                "last_action": f"{comp['name']} kept Factory Conversion alive.",
+            }
+        ]
+
+    ensure_game_shape(game)
+    active_names = [
+        initiative["name"]
+        for comp in game["competitors"]
+        for initiative in comp["initiatives"]
+        if initiative["remaining_months"] > 0
+    ]
+
+    assert len(active_names) == 3
+    assert len(active_names) == len(set(active_names))
+    assert sum(name == "Factory Conversion" for name in active_names) == 1

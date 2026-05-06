@@ -10,11 +10,11 @@ const compactMoney = (v) =>
     style: "currency",
     currency: "USD",
     notation: "compact",
-    maximumFractionDigits: 2,
+    maximumFractionDigits: 1,
   }).format(v ?? 0);
 
-const signed = (v) => `${v >= 0 ? "+" : ""}${money(v)}`;
-const signedCompact = (v) => `${v >= 0 ? "+" : ""}${compactMoney(v)}`;
+const signedMoney = (v) => `${(v ?? 0) >= 0 ? "+" : ""}${money(v ?? 0)}`;
+const signedCompact = (v) => `${(v ?? 0) >= 0 ? "+" : ""}${compactMoney(v ?? 0)}`;
 
 async function api(path, opts = {}) {
   const res = await fetch(`${API}${path}`, {
@@ -26,6 +26,33 @@ async function api(path, opts = {}) {
     throw new Error(detail || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+function Impact({ turn }) {
+  if (!turn) return null;
+  return (
+    <div className="impact-row">
+      <span>Cash {signedMoney(turn.player_total_cash_delta ?? turn.player_cash_delta)}</span>
+      <span>Revenue {signedMoney(turn.player_total_revenue_delta ?? turn.player_revenue_delta)}</span>
+      <span>Value {signedCompact(turn.player_total_market_cap_delta ?? turn.player_market_cap_delta)}</span>
+    </div>
+  );
+}
+
+function EventCard({ event }) {
+  if (!event) return null;
+  const source = event.source || event.name || "Market";
+  const title = event.title || event.action || "Update";
+  const body = event.body || event.summary || "";
+  return (
+    <article className="event-row">
+      <span>{source}</span>
+      <div>
+        <h3>{title}</h3>
+        {body ? <p>{body}</p> : null}
+      </div>
+    </article>
+  );
 }
 
 export default function App() {
@@ -61,25 +88,6 @@ export default function App() {
       localStorage.setItem("game_id", game.id);
       setGameId(game.id);
       setState(game);
-    } catch (e) {
-      setError(String(e.message || e));
-    } finally {
-      setBusy("");
-    }
-  };
-
-  const addAction = async (e) => {
-    e.preventDefault();
-    const text = draft.trim();
-    if (!text) return;
-    setBusy("add");
-    setError("");
-    try {
-      const next = await api(`/api/game/${gameId}/action`, {
-        method: "POST",
-        body: JSON.stringify({ text }),
-      });
-      setState(next);
       setDraft("");
     } catch (e) {
       setError(String(e.message || e));
@@ -88,22 +96,18 @@ export default function App() {
     }
   };
 
-  const removeAction = async (index) => {
-    setError("");
-    try {
-      const next = await api(`/api/game/${gameId}/action/${index}`, { method: "DELETE" });
-      setState(next);
-    } catch (e) {
-      setError(String(e.message || e));
-    }
-  };
-
-  const simulate = async () => {
+  const simulate = async (e) => {
+    e.preventDefault();
+    if (!state || state.game_over) return;
     setBusy("sim");
     setError("");
     try {
-      const next = await api(`/api/game/${gameId}/simulate`, { method: "POST" });
+      const next = await api(`/api/game/${gameId}/simulate`, {
+        method: "POST",
+        body: JSON.stringify({ text: draft.trim() }),
+      });
       setState(next);
+      setDraft("");
     } catch (e) {
       setError(String(e.message || e));
     } finally {
@@ -115,247 +119,212 @@ export default function App() {
     localStorage.removeItem("game_id");
     setGameId("");
     setState(null);
+    setDraft("");
   };
 
   if (!gameId || !state) {
     return (
-      <main className="app-shell start-screen">
-        <header className="topbar">
-          <h1>Pax Venture</h1>
-          <p>Write actions. Simulate the month. The LLM runs the world.</p>
-        </header>
-        {error ? <p className="error-banner">{error}</p> : null}
-        <section className="panel start-card">
-          <h2>New Game</h2>
+      <main className="start-shell">
+        <section className="start-panel">
+          <p className="eyebrow">Pax Venture</p>
+          <h1>Start an automotive company.</h1>
+          <p>One monthly CEO order. The LLM runs the market, rivals, inbox, and memory.</p>
+          {error ? <p className="error-banner">{error}</p> : null}
           <input
+            id="company-name"
+            name="company_name"
             value={companyDraft}
             onChange={(e) => setCompanyDraft(e.target.value)}
             placeholder="Company name"
           />
           <input
+            id="ceo-name"
+            name="ceo_name"
             value={ceoDraft}
             onChange={(e) => setCeoDraft(e.target.value)}
-            placeholder="CEO name (optional)"
+            placeholder="CEO name"
           />
           <button type="button" onClick={startGame} disabled={busy === "new"}>
-            {busy === "new" ? "Starting..." : "Start Company"}
+            {busy === "new" ? "Starting..." : "Start company"}
           </button>
         </section>
       </main>
     );
   }
 
-  const lastTurn = state.history[state.history.length - 1];
+  const lastTurn = state.history?.[state.history.length - 1];
   const identity = state.memory?.identity || {};
-  const rivalThreads = (state.competitors || [])
-    .flatMap((competitor) =>
-      (competitor.initiatives || []).map((initiative) => ({
-        competitor: competitor.name,
-        ...initiative,
-      })),
-    )
-    .sort((a, b) => (a.remaining_months ?? 0) - (b.remaining_months ?? 0));
+  const competitorEvents = lastTurn?.competitor_events || lastTurn?.competitor_actions || [];
+  const worldEvents = lastTurn?.world_events || (lastTurn?.market ? [lastTurn.market] : []);
+  const memoryThreads = state.memory?.threads || [];
 
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand-block">
+        <div>
           <h1>Pax Venture</h1>
-          <p className="brand-sub">
-            {identity.ceo_name ? `${identity.ceo_name} · ` : ""}
-            {state.company_name} · Month {state.month}
-            <button type="button" className="link" onClick={reset}>
-              new game
-            </button>
+          <p>
+            {identity.ceo_name ? `${identity.ceo_name} / ` : ""}
+            {state.company_name} / Month {state.month}
           </p>
         </div>
-        <div className="kpi-bar">
-          <div className="kpi">
-            <span>Cash</span>
-            <strong>{money(state.cash)}</strong>
-          </div>
-          <div className="kpi">
-            <span>Revenue / mo</span>
-            <strong>{money(state.revenue)}</strong>
-          </div>
+        <div className="top-actions">
+          <button type="button" className="ghost-btn" onClick={reset}>
+            New game
+          </button>
         </div>
-        <button
-          type="button"
-          className="simulate-btn"
-          onClick={simulate}
-          disabled={busy === "sim"}
-        >
-          {busy === "sim" ? "Simulating..." : `Simulate Month ${state.month + 1}`}
-        </button>
       </header>
+
       {error ? <p className="error-banner">{error}</p> : null}
-      <div className="main-grid">
-        <section className="col-main">
-          <section className="panel actions-panel">
-            <div className="panel-title-row">
-              <h2>Action Plan</h2>
-              <span>{state.actions.length} queued</span>
+
+      <section className="kpi-strip">
+        <div>
+          <span>Cash</span>
+          <strong>{money(state.cash)}</strong>
+        </div>
+        <div>
+          <span>Revenue / month</span>
+          <strong>{money(state.revenue)}</strong>
+        </div>
+        <div>
+          <span>Market value</span>
+          <strong>{compactMoney(state.market_cap)}</strong>
+        </div>
+        <div className={state.game_over ? "status danger" : "status"}>
+          <span>Status</span>
+          <strong>{state.game_over ? "Eliminated" : "Operating"}</strong>
+        </div>
+      </section>
+
+      <div className="workspace">
+        <section className="main-column">
+          <section className="inbox-band">
+            <div className="section-head">
+              <h2>Inbox</h2>
+              <span>{state.inbox?.length || 0} items</span>
             </div>
-            <div className="action-list">
-              {state.actions.length ? (
-                state.actions.map((text, i) => (
-                  <article key={`${i}-${text}`} className="action-item">
-                    <span>{i + 1}</span>
-                    <p>{text}</p>
-                    <button type="button" className="remove" onClick={() => removeAction(i)}>
-                      ×
-                    </button>
-                  </article>
-                ))
-              ) : (
-                <p className="empty-state">No actions queued. Write what you want to do this month.</p>
-              )}
+            <div className="inbox-list">
+              {(state.inbox || []).map((item, index) => (
+                <article key={`${item.subject}-${index}`} className="inbox-item">
+                  <span>{item.sender}</span>
+                  <h3>{item.subject}</h3>
+                  <p>{item.body}</p>
+                </article>
+              ))}
             </div>
-            <form className="action-compose" onSubmit={addAction}>
+          </section>
+
+          <section className="order-band">
+            <div className="section-head">
+              <h2>CEO Order</h2>
+              <span>One decision resolves the month</span>
+            </div>
+            <form onSubmit={simulate} className="order-form">
               <textarea
+                id="ceo-order"
+                name="ceo_order"
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    if (draft.trim() && busy !== "add") addAction(e);
-                  }
-                }}
-                placeholder="Type your action..."
-                disabled={busy === "add"}
-                rows={1}
+                placeholder={state.game_over ? "Game over" : "Type the order for next month..."}
+                disabled={busy === "sim" || state.game_over}
+                rows={4}
               />
-              <button
-                type="submit"
-                className="send-btn"
-                disabled={busy === "add" || !draft.trim()}
-                aria-label="Add action"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M22 2 11 13" />
-                  <path d="M22 2 15 22l-4-9-9-4 20-7Z" />
-                </svg>
+              <button type="submit" disabled={busy === "sim" || state.game_over}>
+                {busy === "sim" ? "Resolving..." : `Simulate month ${state.month + 1}`}
               </button>
             </form>
           </section>
 
-          {lastTurn ? (
-            <section className="panel panel-month">
-              <div className="panel-title-row">
-                <h2>Month {lastTurn.month}</h2>
-                <div className="impact-row">
-                  <span>Cash {signed(lastTurn.player_total_cash_delta ?? lastTurn.player_cash_delta)}</span>
-                  <span>Revenue {signed(lastTurn.player_total_revenue_delta ?? lastTurn.player_revenue_delta)}</span>
-                  <span>
-                    Market Cap {signedCompact(lastTurn.player_total_market_cap_delta ?? lastTurn.player_market_cap_delta ?? 0)}
-                  </span>
-                  {lastTurn.initiative_effect?.names?.length ? (
-                    <span>Recurring {signed(lastTurn.initiative_effect.cash_delta)} cash</span>
-                  ) : null}
+          <section className="report-band">
+            <div className="section-head">
+              <h2>{lastTurn ? `Month ${lastTurn.month} Report` : "Monthly Report"}</h2>
+              <Impact turn={lastTurn} />
+            </div>
+            {lastTurn ? (
+              <div className="report-stack">
+                <EventCard event={lastTurn.your_move} />
+                <div className="split-report">
+                  <div>
+                    <h3 className="subhead">Competitors</h3>
+                    {competitorEvents.map((event, index) => (
+                      <EventCard key={`${event.name || "competitor"}-${index}`} event={event} />
+                    ))}
+                  </div>
+                  <div>
+                    <h3 className="subhead">World</h3>
+                    {worldEvents.map((event, index) => (
+                      <EventCard key={`${event.title || "world"}-${index}`} event={event} />
+                    ))}
+                  </div>
                 </div>
               </div>
-              <div className="month-body">
-                {[lastTurn.your_move, lastTurn.competitor_spotlight, lastTurn.market]
-                  .filter((s) => {
-                    if (!s || (!s.title && !s.body)) return false;
-                    const text = `${s.title || ""} ${s.body || ""}`.toLowerCase();
-                    return !/impact chip|numeric impact|schema|simulation internal|shown in the impact/.test(text);
-                  })
-                  .map((s, i) => (
-                    <article key={i} className="story-card">
-                      {s.source ? <span className="story-source">{s.source}</span> : null}
-                      <h3>{s.title}</h3>
-                      <p>{s.body}</p>
-                    </article>
-                  ))}
-                {lastTurn.competitor_actions?.length ? (
-                  <details className="competitor-actions-wrap">
-                    <summary>What competitors did this month</summary>
-                    <ul className="competitor-actions">
-                      {lastTurn.competitor_actions.map((c) => (
-                        <li key={c.name}>
-                          <strong>{c.name}:</strong> {c.action}
-                          <span>
-                            Cash {signed(c.cash_delta ?? 0)} · Revenue {signedCompact(c.revenue_delta ?? 0)} ·
-                            Market Cap {signedCompact(c.market_cap_delta ?? 0)}
-                          </span>
-                          {c.recurring_effect?.names?.length ? (
-                            <span>
-                              Recurring {signed(c.recurring_effect.cash_delta)} cash from{" "}
-                              {c.recurring_effect.names.join(", ")}
-                            </span>
-                          ) : null}
-                          {c.initiative ? (
-                            <span>
-                              {c.initiative_status === "continued" ? "Continuing plan" : "Active plan"}: {c.initiative}
-                            </span>
-                          ) : null}
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                ) : null}
-              </div>
+            ) : (
+              <p className="empty-state">Your first monthly result will appear here after the CEO order resolves.</p>
+            )}
+          </section>
+
+          {state.game_over && state.autopsy ? (
+            <section className="autopsy-band">
+              <h2>Board Autopsy</h2>
+              <p>{state.autopsy.board_note}</p>
+              <span>Last decision: {state.autopsy.last_decision}</span>
             </section>
           ) : null}
         </section>
 
-        <aside className="col-side">
-          <section className="panel ranking-panel">
-            <h2>Market Cap Ranking</h2>
+        <aside className="side-column">
+          <section>
+            <div className="section-head">
+              <h2>Leaderboard</h2>
+            </div>
             <ul className="leaderboard">
-              {state.leaderboard.map((row, i) => (
+              {state.leaderboard.map((row, index) => (
                 <li key={row.name} className={row.is_player ? "is-you" : ""}>
-                  <div>
-                    <span className="rank">#{i + 1}</span>
-                    <strong>{row.name}</strong>
-                  </div>
-                  <div className="value-stack">
-                    <strong>{compactMoney(row.market_cap ?? row.cash)}</strong>
-                    <span>{compactMoney(row.revenue)} / mo</span>
-                    {row.initiatives ? <span>{row.initiatives} active plans</span> : null}
-                  </div>
+                  <span>#{index + 1}</span>
+                  <strong>{row.name}</strong>
+                  <em>{compactMoney(row.market_cap ?? row.cash)}</em>
                 </li>
               ))}
             </ul>
           </section>
 
-          {state.initiatives?.length ? (
-            <section className="panel initiatives-panel">
-              <h2>Active Initiatives</h2>
-              <ul className="initiative-list">
-                {state.initiatives.map((initiative) => (
-                  <li key={initiative.name}>
-                    <strong>{initiative.name}</strong>
+          <section>
+            <div className="section-head">
+              <h2>Active Plans</h2>
+            </div>
+            <ul className="thread-list">
+              {(state.initiatives || []).length ? (
+                state.initiatives.map((item) => (
+                  <li key={item.name}>
+                    <strong>{item.name}</strong>
                     <span>
-                      {initiative.remaining_months} mo · {signed(initiative.monthly_cash_delta)} cash/mo ·{" "}
-                      {signedCompact(initiative.monthly_market_cap_delta)} value/mo
+                      {item.remaining_months} mo left / {signedMoney(item.monthly_cash_delta)} cash/mo
                     </span>
                   </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
+                ))
+              ) : (
+                <li className="muted">No recurring company plans yet.</li>
+              )}
+            </ul>
+          </section>
 
-          {rivalThreads.length ? (
-            <section className="panel initiatives-panel">
-              <h2>Rival Threads</h2>
-              <ul className="initiative-list rival-thread-list">
-                {rivalThreads.slice(0, 6).map((initiative) => (
-                  <li key={`${initiative.competitor}-${initiative.name}`}>
-                    <strong>
-                      {initiative.competitor}: {initiative.name}
-                    </strong>
-                    <span>
-                      M{initiative.started_month || "?"} / {initiative.remaining_months} mo left /{" "}
-                      {signedCompact(initiative.monthly_market_cap_delta)} value/mo
-                    </span>
-                    {initiative.last_action ? <span>{initiative.last_action}</span> : null}
+          <section>
+            <div className="section-head">
+              <h2>Memory</h2>
+            </div>
+            <ul className="thread-list">
+              {memoryThreads.length ? (
+                memoryThreads.map((thread) => (
+                  <li key={thread.label}>
+                    <strong>{thread.label}</strong>
+                    <span>{thread.summary}</span>
                   </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
+                ))
+              ) : (
+                <li className="muted">Threads will build as the LLM remembers the company.</li>
+              )}
+            </ul>
+          </section>
         </aside>
       </div>
     </main>
